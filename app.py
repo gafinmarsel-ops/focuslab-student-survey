@@ -1,259 +1,357 @@
+from __future__ import annotations
 
-import streamlit as st
+from datetime import datetime, timezone
+from typing import Any
+
 import pandas as pd
 import plotly.express as px
-from datetime import datetime
-from supabase import create_client
+import streamlit as st
+from supabase import Client, create_client
+
 
 st.set_page_config(
-    page_title="Фокус студента",
+    page_title="FocusLab | Student Digital Habits",
     page_icon="🎯",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="collapsed",
 )
 
-# Подключение к Supabase
+COLORS = {
+    "navy": "#16324F",
+    "teal": "#246A73",
+    "orange": "#E39B55",
+    "ink": "#243447",
+    "muted": "#617386",
+    "surface": "#FFFFFF",
+    "border": "#DCE6ED",
+}
+
+
+def apply_styles() -> None:
+    st.markdown(
+        f"""
+        <style>
+        .stApp {{
+            background: linear-gradient(180deg, #F2F6FA 0%, #FFFFFF 48%);
+            color: {COLORS["ink"]};
+        }}
+        .block-container {{
+            max-width: 1120px;
+            padding-top: 2rem;
+            padding-bottom: 3rem;
+        }}
+        .hero {{
+            background: linear-gradient(120deg, {COLORS["navy"]}, {COLORS["teal"]});
+            padding: 2rem 2.1rem;
+            border-radius: 20px;
+            color: #FFFFFF;
+            margin-bottom: 1.25rem;
+        }}
+        .hero h1 {{ color: #FFFFFF; margin: 0 0 .45rem 0; }}
+        .hero p {{ color: #E5F3F4; margin: 0; font-size: 1.05rem; }}
+        div[data-testid="stForm"] {{
+            background: {COLORS["surface"]};
+            border: 1px solid {COLORS["border"]};
+            padding: 1.35rem;
+            border-radius: 16px;
+        }}
+        div[data-testid="stMetric"] {{
+            background: #FFFFFF;
+            border: 1px solid {COLORS["border"]};
+            padding: 1rem;
+            border-radius: 14px;
+        }}
+        div[data-testid="stFormSubmitButton"] button,
+        .stButton button[kind="primary"] {{
+            background: {COLORS["teal"]};
+            border-color: {COLORS["teal"]};
+            border-radius: 10px;
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def get_supabase_credentials() -> tuple[str, str]:
+    """Read public client credentials from Streamlit secrets."""
+    url = st.secrets.get("SUPABASE_URL", "").strip()
+    key = (
+        st.secrets.get("SUPABASE_ANON_KEY", "")
+        or st.secrets.get("SUPABASE_KEY", "")
+    ).strip()
+
+    if not url or not key:
+        raise RuntimeError(
+            "Supabase credentials are missing. Add SUPABASE_URL and "
+            "SUPABASE_ANON_KEY to Streamlit secrets."
+        )
+
+    return url, key
+
+
 @st.cache_resource
-def get_supabase():
-    url = st.secrets["SUPABASE_URL"]
-    key = st.secrets["SUPABASE_KEY"]
+def get_supabase(url: str, key: str) -> Client:
     return create_client(url, key)
 
-st.markdown("""
-<style>
-.stApp {
-    background: linear-gradient(180deg, #f4f7fb 0%, #ffffff 45%);
-}
-.block-container {
-    padding-top: 2rem;
-    max-width: 1120px;
-}
-.hero {
-    background: linear-gradient(120deg,#16324f,#246a73);
-    padding: 1.5rem 1.8rem;
-    border-radius: 18px;
-    color: white;
-    margin-bottom: 1rem;
-}
-.hero h1 {
-    color: white;
-    margin-bottom: .25rem;
-}
-.hero p {
-    color: #e5f3f4;
-    margin-bottom: 0;
-}
-div[data-testid="stForm"] {
-    background: #ffffff;
-    border: 1px solid #dbe5ed;
-    padding: 1.2rem;
-    border-radius: 16px;
-}
-</style>
 
-<div class="hero">
-<h1>🎯 Фокус студента</h1>
-<p>Опрос о цифровых привычках и концентрации во время учёбы</p>
-</div>
-""", unsafe_allow_html=True)
+@st.cache_data(ttl=30, show_spinner=False)
+def load_stats(url: str, key: str) -> dict[str, Any]:
+    """Load aggregated statistics only; individual submissions stay private."""
+    response = get_supabase(url, key).rpc("get_survey_stats").execute()
+    data = response.data
 
-st.write(
-    "Анкета поможет изучить, как уведомления, смартфон и режим "
-    "занятий связаны с субъективной концентрацией студентов. "
-    "Опрос анонимный, занимает около 2 минут. "
-    "Не указывайте имя и контактные данные."
-)
+    if isinstance(data, list) and data:
+        data = data[0]
 
-with st.form("focus_survey"):
-    st.subheader("Расскажите о своих привычках")
+    if not isinstance(data, dict):
+        raise RuntimeError("The statistics function returned an unexpected response.")
+
+    return data
+
+
+def make_count_frame(values: Any, label_name: str) -> pd.DataFrame:
+    if not isinstance(values, dict):
+        values = {}
+    frame = pd.DataFrame(
+        [{"Answer": str(label), "Responses": int(count or 0)}
+         for label, count in values.items()]
+    )
+    if frame.empty:
+        return pd.DataFrame(columns=["Answer", "Responses"])
+    return frame.sort_values("Responses", ascending=False)
+
+
+def render_analytics(stats: dict[str, Any]) -> None:
+    total = int(stats.get("total_responses") or 0)
+    avg_focus = stats.get("average_focus_score")
+    avg_age = stats.get("average_age")
+    notification_counts = stats.get("notification_counts") or {}
+    phone_time_counts = stats.get("phone_time_counts") or {}
+
+    first, second, third = st.columns(3)
+    first.metric("Total responses", f"{total:,}")
+    second.metric(
+        "Average focus score",
+        f"{float(avg_focus):.1f} / 10" if avg_focus is not None else "—",
+    )
+    third.metric(
+        "Average age",
+        f"{float(avg_age):.1f}" if avg_age is not None else "—",
+    )
+
     left, right = st.columns(2)
 
     with left:
-        age = st.number_input(
-            "Ваш возраст", min_value=14, max_value=80,
-            value=19, step=1
-        )
-        course = st.selectbox(
-            "На каком вы курсе?",
-            ["1 курс", "2 курс", "3 курс", "4 курс",
-             "5 курс и выше", "Не учусь сейчас"]
-        )
-        phone_hours = st.select_slider(
-            "Сколько времени в день обычно проводите в смартфоне?",
-            options=["Менее 1 часа", "1–2 часа", "3–4 часа",
-                     "5–6 часов", "7 часов и более"]
-        )
-        notifications = st.radio(
-            "Как часто уведомления отвлекают вас во время учёбы?",
-            ["Никогда", "Редко", "Иногда", "Часто", "Очень часто"]
-        )
+        frame = make_count_frame(notification_counts, "Notification frequency")
+        if not frame.empty:
+            figure = px.bar(
+                frame,
+                x="Answer",
+                y="Responses",
+                title="How often notifications interrupt study",
+                color_discrete_sequence=[COLORS["teal"]],
+            )
+            figure.update_layout(
+                plot_bgcolor="white",
+                paper_bgcolor="white",
+                font_color=COLORS["ink"],
+                xaxis_title=None,
+                yaxis_title="Responses",
+                margin=dict(l=10, r=10, t=55, b=10),
+            )
+            st.plotly_chart(figure, use_container_width=True)
+        else:
+            st.info("No notification data yet.")
 
     with right:
-        study_focus = st.slider(
-            "Насколько легко вам сосредоточиться на учебной задаче?",
-            1, 10, 6,
-            help="1 — очень трудно, 10 — очень легко"
-        )
-        phone_during_study = st.radio(
-            "Что обычно делаете с телефоном во время занятий?",
-            ["Убираю и не проверяю", "Проверяю иногда",
-             "Часто отвлекаюсь на него", "Использую для учебных задач"]
-        )
-        study_session = st.selectbox(
-            "Сколько обычно длится ваша непрерывная учебная сессия?",
-            ["Менее 15 минут", "15–30 минут", "31–45 минут",
-             "46–60 минут", "Более часа"]
-        )
-        breaks = st.selectbox(
-            "Как часто делаете перерывы при самостоятельной учёбе?",
-            ["Примерно каждые 15–20 минут",
-             "Каждые 30–45 минут", "Примерно раз в час",
-             "Когда устану", "Почти не делаю перерывов"]
-        )
+        frame = make_count_frame(phone_time_counts, "Daily phone time")
+        if not frame.empty:
+            figure = px.bar(
+                frame,
+                x="Answer",
+                y="Responses",
+                title="Daily smartphone screen time",
+                color_discrete_sequence=[COLORS["orange"]],
+            )
+            figure.update_layout(
+                plot_bgcolor="white",
+                paper_bgcolor="white",
+                font_color=COLORS["ink"],
+                xaxis_title=None,
+                yaxis_title="Responses",
+                margin=dict(l=10, r=10, t=55, b=10),
+            )
+            st.plotly_chart(figure, use_container_width=True)
+        else:
+            st.info("No screen-time data yet.")
 
-    distractions = st.multiselect(
-        "Что чаще всего мешает сосредоточиться?",
-        ["Уведомления и сообщения", "Социальные сети",
-         "Видео и игры", "Шум вокруг", "Усталость",
-         "Сложность материала", "Личные дела",
-         "Ничего из перечисленного"]
+
+def main() -> None:
+    apply_styles()
+
+    st.markdown(
+        """
+        <section class="hero">
+            <h1>🎯 FocusLab</h1>
+            <p>Student digital habits and study concentration survey</p>
+        </section>
+        """,
+        unsafe_allow_html=True,
     )
 
-    comment = st.text_area(
-        "Что помогает вам лучше сосредоточиться? (необязательно)",
-        max_chars=500
+    st.write(
+        "This anonymous student survey explores how smartphone use, "
+        "notifications and study routines relate to perceived concentration. "
+        "It takes about two minutes. Please do not include names or contact details."
     )
-
-    submitted = st.form_submit_button(
-        "Отправить ответы",
-        type="primary",
-        use_container_width=True
-    )
-
-# Сохранение ответа в базу
-if submitted:
-    answer = {
-        "Возраст": int(age),
-        "Курс": course,
-        "Время в смартфоне": phone_hours,
-        "Отвлекают уведомления": notifications,
-        "Концентрация (1–10)": int(study_focus),
-        "Телефон во время учёбы": phone_during_study,
-        "Длительность сессии": study_session,
-        "Перерывы": breaks,
-        "Отвлекающие факторы": ", ".join(distractions),
-        "Что помогает": comment.strip(),
-        "Время отправки": datetime.now().strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )
-    }
+    st.caption("Academic portfolio project · Voluntary participation · Anonymous survey")
 
     try:
-        db = get_supabase()
-        db.table("survey_responses").insert(
-            {"answers": answer}
-        ).execute()
+        url, key = get_supabase_credentials()
+        database = get_supabase(url, key)
+        database_ready = True
+    except Exception as exc:
+        database_ready = False
+        database_error = str(exc)
 
-        st.success(
-            "Спасибо! Ответ успешно сохранён в базе данных."
-        )
-
-    except Exception as e:
-        st.error("Не удалось сохранить ответ в Supabase.")
-        st.code(str(e))
-
-st.divider()
-st.subheader("📊 Аналитика ответов")
-
-# Загружаем ответы из базы при каждом открытии приложения
-try:
-    db = get_supabase()
-    result = (
-        db.table("survey_responses")
-        .select("answers")
-        .order("id", desc=True)
-        .execute()
-    )
-
-    responses = [
-        row["answers"]
-        for row in result.data
-        if row.get("answers")
-    ]
-
-    if not responses:
-        st.info(
-            "Пока нет ответов. Заполните анкету, "
-            "чтобы увидеть сводку."
-        )
+    if database_ready:
+        st.success("Database connection configured.")
     else:
-        df = pd.DataFrame(responses)
+        st.warning("The survey database is not configured yet.")
+        with st.expander("Setup details"):
+            st.code(database_error)
 
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Всего ответов", len(df))
-        c2.metric(
-            "Средняя концентрация",
-            f"{df['Концентрация (1–10)'].mean():.1f} / 10"
-        )
-        c3.metric(
-            "Средний возраст",
-            f"{df['Возраст'].mean():.1f}"
-        )
+    with st.form("focus_survey", clear_on_submit=True):
+        st.subheader("About your study habits")
+        left, right = st.columns(2)
 
-        st.dataframe(
-            df.drop(columns=["Что помогает"], errors="ignore"),
+        with left:
+            age = st.number_input("Your age", min_value=14, max_value=80, value=19, step=1)
+            course = st.selectbox(
+                "Current study year",
+                ["Year 1", "Year 2", "Year 3", "Year 4", "Year 5 or above", "Not currently studying"],
+            )
+            phone_time = st.select_slider(
+                "How much time do you spend on your smartphone each day?",
+                options=["Less than 1 hour", "1–2 hours", "3–4 hours", "5–6 hours", "7 hours or more"],
+            )
+            notifications = st.radio(
+                "How often do notifications distract you while studying?",
+                ["Never", "Rarely", "Sometimes", "Often", "Very often"],
+            )
+
+        with right:
+            focus_score = st.slider(
+                "How easy is it for you to concentrate on a study task?",
+                min_value=1,
+                max_value=10,
+                value=6,
+                help="1 = very difficult; 10 = very easy",
+            )
+            phone_during_study = st.radio(
+                "What do you usually do with your phone while studying?",
+                [
+                    "Put it away and do not check it",
+                    "Check it occasionally",
+                    "Get distracted by it frequently",
+                    "Use it for study-related tasks",
+                ],
+            )
+            study_session = st.selectbox(
+                "How long is your usual uninterrupted study session?",
+                ["Under 15 minutes", "15–30 minutes", "31–45 minutes", "46–60 minutes", "More than an hour"],
+            )
+            break_frequency = st.selectbox(
+                "How often do you take breaks during independent study?",
+                [
+                    "Every 15–20 minutes",
+                    "Every 30–45 minutes",
+                    "About once an hour",
+                    "When I feel tired",
+                    "Almost never",
+                ],
+            )
+
+        distractions = st.multiselect(
+            "What most often makes it difficult to concentrate?",
+            [
+                "Notifications and messages",
+                "Social media",
+                "Videos and games",
+                "Background noise",
+                "Fatigue",
+                "Difficult study material",
+                "Personal matters",
+                "None of the above",
+            ],
+        )
+        focus_tips = st.text_area(
+            "What helps you concentrate better? (optional)",
+            max_chars=500,
+            placeholder="Share a tip or leave this field blank.",
+        )
+        submitted = st.form_submit_button(
+            "Submit anonymous response",
+            type="primary",
             use_container_width=True,
-            hide_index=True
         )
 
-        st.download_button(
-            "⬇️ Скачать ответы в CSV",
-            df.to_csv(index=False).encode("utf-8-sig"),
-            "student_focus_responses.csv",
-            "text/csv"
-        )
+    if submitted:
+        if not database_ready:
+            st.error("Your response was not saved because the database is unavailable.")
+        else:
+            answer = {
+                "age": int(age),
+                "course": course,
+                "daily_phone_time": phone_time,
+                "notification_distraction": notifications,
+                "focus_score": int(focus_score),
+                "phone_during_study": phone_during_study,
+                "study_session": study_session,
+                "break_frequency": break_frequency,
+                "distractions": distractions,
+                "focus_tips": focus_tips.strip(),
+                "submitted_at": datetime.now(timezone.utc).isoformat(),
+            }
+            try:
+                database.table("survey_responses").insert(
+                    {"answers": answer}
+                ).execute()
+                load_stats.clear()
+                st.success("Thank you! Your anonymous response has been saved.")
+            except Exception:
+                st.error(
+                    "We could not save your response. Check the Supabase table "
+                    "and anonymous INSERT policy in the setup guide."
+                )
 
-        a, b = st.columns(2)
-
-        with a:
-            fig = px.histogram(
-                df,
-                x="Концентрация (1–10)",
-                nbins=10,
-                title="Оценка концентрации",
-                color_discrete_sequence=["#247b83"]
-            )
-            st.plotly_chart(fig, use_container_width=True)
-
-        with b:
-            order = [
-                "Никогда", "Редко", "Иногда",
-                "Часто", "Очень часто"
-            ]
-            counts = (
-                df["Отвлекают уведомления"]
-                .value_counts()
-                .reindex(order, fill_value=0)
-                .rename_axis("Частота")
-                .reset_index(name="Количество")
-            )
-
-            fig = px.bar(
-                counts,
-                x="Частота",
-                y="Количество",
-                title="Как часто отвлекают уведомления",
-                color_discrete_sequence=["#e39b55"]
-            )
-            st.plotly_chart(fig, use_container_width=True)
-
-        st.caption(
-            "Результаты основаны на ответах, загруженных из Supabase. "
-            "Это учебный опрос, а не научно валидированный тест."
-        )
-
-except Exception as e:
-    st.error(
-        "Не удалось загрузить аналитику из Supabase. "
-        "Проверь настройки Secrets и права доступа к таблице."
+    st.divider()
+    st.subheader("📊 Community insights")
+    st.caption(
+        "Only aggregated statistics are displayed. Individual answers and "
+        "free-text comments are not exposed on this page."
     )
-    st.code(str(e))
+
+    if database_ready:
+        try:
+            with st.spinner("Loading aggregated results…"):
+                stats = load_stats(url, key)
+            if int(stats.get("total_responses") or 0) == 0:
+                st.info("There are no responses yet. Submit the survey to start the dataset.")
+            else:
+                render_analytics(stats)
+        except Exception:
+            st.error(
+                "Analytics are not available. Follow the Supabase SQL setup "
+                "instructions in the README to create the statistics function."
+            )
+
+    st.caption(
+        "FocusLab is an educational survey, not a clinically validated "
+        "assessment of attention or productivity."
+    )
+
+
+if __name__ == "__main__":
+    main()
