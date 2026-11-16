@@ -337,8 +337,14 @@ def main() -> None:
         try:
             with st.spinner("Loading aggregated results…"):
                 stats = load_stats(url, key)
-            if int(stats.get("total_responses") or 0) == 0:
+            response_count = int(stats.get("total_responses") or 0)
+            if response_count == 0:
                 st.info("There are no responses yet. Submit the survey to start the dataset.")
+            elif response_count < 5:
+                st.info(
+                    "Aggregate insights will appear after at least five responses "
+                    "have been collected, to help protect participant privacy."
+                )
             else:
                 render_analytics(stats)
         except Exception:
